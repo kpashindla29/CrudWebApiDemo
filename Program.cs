@@ -1,7 +1,10 @@
-
 using Microsoft.EntityFrameworkCore;
-using Pomelo.EntityFrameworkCore.MySql; 
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Identity.Web;
+using Microsoft.OpenApi.Models;
 using CrudWebApiDemo.Models;
+using Microsoft.IdentityModel.Tokens;
+
 namespace CrudWebApiDemo;
 
 public class Program
@@ -10,40 +13,139 @@ public class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
-        // Add services to the container.
-        builder.Services.AddAuthorization();
+        // Register services
+        builder.Services.AddControllers();
+        builder.Services.AddEndpointsApiExplorer();
         
-        // builder.Services.AddDbContext<Data.ProductContext>(options =>
-        //             options.UseInMemoryDatabase("ProductList"));
+        // Configure Swagger with Azure AD OAuth
+        builder.Services.AddSwaggerGen(c =>
+        {
+            c.SwaggerDoc("v1", new OpenApiInfo 
+            { 
+                Title = "Product API", 
+                Version = "v1",
+                Description = "Product Management API with Azure AD Authentication"
+            });
+            
+            // Add OAuth2 security definition for Azure AD
+            c.AddSecurityDefinition("oauth2", new OpenApiSecurityScheme
+            {
+                Type = SecuritySchemeType.OAuth2,
+                Flows = new OpenApiOAuthFlows
+                {
+                    AuthorizationCode = new OpenApiOAuthFlow
+                    {
+                        AuthorizationUrl = new Uri($"https://login.microsoftonline.com/{builder.Configuration["AzureAd:TenantId"]}/oauth2/v2.0/authorize"),
+                        TokenUrl = new Uri($"https://login.microsoftonline.com/{builder.Configuration["AzureAd:TenantId"]}/oauth2/v2.0/token"),
+                        Scopes = new Dictionary<string, string>
+                        {
+                            { $"api://{builder.Configuration["AzureAd:ClientId"]}/access_as_user", "Access the API" }
+                        }
+                    },
+                    // For client credentials flow
+                    ClientCredentials = new OpenApiOAuthFlow
+                    {
+                        TokenUrl = new Uri($"https://login.microsoftonline.com/{builder.Configuration["AzureAd:TenantId"]}/oauth2/v2.0/token"),
+                        Scopes = new Dictionary<string, string>
+                        {
+                            { $"api://{builder.Configuration["AzureAd:ClientId"]}/.default", "Access the API" }
+                        }
+                    }
+                }
+            });
+            
+            c.AddSecurityRequirement(new OpenApiSecurityRequirement
+            {
+                {
+                    new OpenApiSecurityScheme
+                    {
+                        Reference = new OpenApiReference
+                        {
+                            Type = ReferenceType.SecurityScheme,
+                            Id = "oauth2"
+                        }
+                    },
+                    new[] { $"api://{builder.Configuration["AzureAd:ClientId"]}/access_as_user" }
+                }
+            });
+        });
 
-        
-        
-        // Your DbContext configuration
+        // REPLACE JWT with Azure AD Authentication
+        // builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        //     .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"))
+        //     .EnableTokenAcquisitionToCallDownstreamApi()
+        //     .AddInMemoryTokenCaches();
+
+        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer(options =>
+        {
+            options.Authority = "https://login.microsoftonline.com/<Tenent-ID>";
+            options.Audience = "api://<Client-ID>";
+            
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+                ValidIssuer = "https://sts.windows.net/e1a3709b-5e96-40af-9f96-dfec799a4803/",
+                ValidAudience = "api://<Client-ID>"
+            };
+        });
+
+        // Or if you want to keep both JWT and Azure AD (hybrid approach)
+        // builder.Services.AddAuthentication()
+        //     .AddJwtBearer("JWT", options =>
+        //     {
+        //         // Keep your existing JWT config here
+        //     })
+        //     .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"), "AzureAD");
+
+        builder.Services.AddAuthorization(options =>
+        {
+            // You can create specific policies
+            options.AddPolicy("RequireAccess", policy =>
+                policy.RequireAuthenticatedUser());
+                
+            // Policy that requires specific scope
+            options.AddPolicy("AccessAsUser", policy =>
+                policy.RequireClaim("scp", "access_as_user"));
+        });
+
+        // Configure DbContext
         var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
         builder.Services.AddDbContext<Data.ProductContext>(options =>
             options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
 
-        // var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-        // builder.Services.AddDbContext<Data.ProductContext>(options =>
-        //     options.UseMySQL(connectionString)); 
-                
-        // Add controllers
-        builder.Services.AddControllers();
-
-        // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-       builder.Services.AddEndpointsApiExplorer();
-       builder.Services.AddSwaggerGen();
-
         var app = builder.Build();
 
+        // Middleware order
+        if (app.Environment.IsDevelopment())
+        {
+            app.UseSwagger();
+            app.UseSwaggerUI(c =>
+            {
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "Product API v1");
+                c.OAuthClientId(builder.Configuration["AzureAd:ClientId"]);
+                c.OAuthUsePkce();
+                c.OAuthScopeSeparator(" ");
+            });
+        }
 
-        // Seed the database
+        app.UseHttpsRedirection();
+
+        // Authentication must come before Authorization
+        app.UseAuthentication();
+        app.UseAuthorization();
+
+        app.MapControllers();
+
+        // Seed database
         using (var scope = app.Services.CreateScope())
         {
             var context = scope.ServiceProvider.GetRequiredService<Data.ProductContext>();
-            context.Database.EnsureCreated(); // Ensure database is created
-            
-            // Check if products already exist to avoid duplicates
+            context.Database.EnsureCreated();
+
             if (!context.Products.Any())
             {
                 context.Products.AddRange(
@@ -54,50 +156,9 @@ public class Program
                     new Product { Name = "Headphones", Price = 149.99m, Description = "Noise-cancelling headphones" }
                 );
                 context.SaveChanges();
-                Console.WriteLine("Sample data added to database.");
             }
         }
 
-
-
-        // Configure the HTTP request pipeline.
-        if (app.Environment.IsDevelopment())
-        {
-            app.UseSwagger();
-            app.UseSwaggerUI();
-        }
-
-        app.UseHttpsRedirection();
-
-        app.UseAuthorization();
-
-        
-        app.MapControllers();
-
-
-        var summaries = new[]
-        {
-            "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-        };
-
-        app.MapGet("/weatherforecast", (HttpContext httpContext) =>
-        {
-            var forecast =  Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                {
-                    Date = DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    TemperatureC = Random.Shared.Next(-20, 55),
-                    Summary = summaries[Random.Shared.Next(summaries.Length)]
-                })
-                .ToArray();
-            return forecast;
-        })
-        .WithName("GetWeatherForecast");
-
         app.Run();
     }
-
-   
-
-    
 }

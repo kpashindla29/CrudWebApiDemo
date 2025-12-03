@@ -1,1 +1,45 @@
-GET http://localhost:5111/api/products/
+### === CONFIGURATION ===
+@tenantId=<Your-TenantId>
+@clientId=<Your-ClientId>
+@clientSecret=<Your-ClientSecret>
+
+@apiBase=http://localhost:5111
+
+### === REQUEST 1: GET TOKEN ===
+
+# @name getToken
+https://login.microsoftonline.com/e1a3709b-5e96-40af-9f96-dfec799a4803/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+&client_id={{clientId}}
+&client_secret={{clientSecret}}
+&scope=api://<{{clientId}}>/.default
+
+### === REQUEST 2: USE TOKEN ===
+
+GET {{apiBase}}/api/products
+Authorization: Bearer {{getToken.response.body.access_token}}
+
+
+### SIMPLIFIED TEST
+@apiBase = http://localhost:5111
+
+### 1. Check if API is running
+GET {{apiBase}}/api/products/public
+
+
+
+### 3. Create product
+POST {{apiBase}}/api/products
+Authorization: Bearer {{getToken.response.body.access_token}}
+Content-Type: application/json
+
+{
+    "name": "New OAuth Test Product",
+    "price": 99.99,
+    "description": "Created with Azure AD authentication"
+}
+
+
+
